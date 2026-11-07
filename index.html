@@ -610,8 +610,12 @@ function showConversionConfig(file) {
     document.getElementById('sourceInfo').textContent = `${file.name} (${sourceFmt.toUpperCase()})`;
 
     // Output format dropdown
-    const select = document.getElementById('outputFormat');
-    select.innerHTML = '';
+    let select = document.getElementById('outputFormat');
+    // Remove old listeners by cloning
+    const newSelect = select.cloneNode(true);
+    newSelect.innerHTML = '';
+    select.parentNode.replaceChild(newSelect, select);
+    select = newSelect;
 
     // Group by method
     const clientOutputs = outputs.filter(o => o.method === 'client');
@@ -806,7 +810,7 @@ async function convertClient(file, sourceFmt, outputFmt, baseName) {
                 const csv = XLSX.utils.sheet_to_csv(workbook.Sheets[name], { FS: delim });
                 parts.push(csv);
             }
-            blob = new Blob(parts.join('\n'), { type: 'text/plain;charset=utf-8' });
+            blob = new Blob([parts.join('\n')], { type: 'text/plain;charset=utf-8' });
             outName = `${baseName}.${outputFmt}`;
         } else if (outputFmt === 'json') {
             const sheet = sheetOpt === 'all' ? workbook.SheetNames[0] : workbook.SheetNames[parseInt(sheetOpt)];
@@ -951,18 +955,14 @@ async function htmlToPdf(htmlContent, title) {
         const pdfHeight = (canvas.height * pdfWidth) / canvas.width;
         const pageHeight = pdf.internal.pageSize.getHeight();
 
-        let position = 0;
-        let remainingHeight = pdfHeight;
-
         if (pdfHeight <= pageHeight) {
             pdf.addImage(imgData, 'PNG', 0, 0, pdfWidth, pdfHeight);
         } else {
-            // Multi-page
-            while (remainingHeight > 0) {
-                pdf.addImage(imgData, 'PNG', 0, position, pdfWidth, pdfHeight);
-                remainingHeight -= pageHeight;
-                position -= pageHeight;
-                if (remainingHeight > 0) pdf.addPage();
+            let yOffset = 0;
+            while (yOffset < pdfHeight) {
+                pdf.addImage(imgData, 'PNG', 0, -yOffset, pdfWidth, pdfHeight);
+                yOffset += pageHeight;
+                if (yOffset < pdfHeight) pdf.addPage();
             }
         }
 
@@ -1014,7 +1014,7 @@ async function imageToPdf(arrayBuffer, mimeType) {
     const x = (pdfW - w) / 2;
     const y = (pdfH - h) / 2;
 
-    const imgFmt = mimeType.includes('png') ? 'PNG' : 'JPEG';
+    const imgFmt = mimeType === 'image/png' ? 'PNG' : 'JPEG';
     pdf.addImage(dataUrl, imgFmt, x, y, w, h);
     return pdf.output('blob');
 }
@@ -1114,15 +1114,29 @@ async function convertViaAPI(file, sourceFmt, outputFmt, baseName) {
 
     const jobData = await jobResponse.json();
     const jobId = jobData.data.id;
-    const uploadUrl = jobData.data.tasks['import-file'].result.form.url;
+    const uploadTask = jobData.data.tasks['import-file'];
+    const uploadUrl = uploadTask.result?.form?.url;
+
+    if (!uploadUrl) {
+        throw new Error('未获取到上传地址，请检查 API Key 权限');
+    }
 
     // Step 2: Upload file
     showProgress('上传文件...', file.name);
     updateProgress(30);
 
+    const uploadForm = new FormData();
+    uploadForm.append('file', file);
+    // Add any additional form fields from the upload task
+    if (uploadTask.result?.form?.parameters) {
+        for (const [key, value] of Object.entries(uploadTask.result.form.parameters)) {
+            uploadForm.append(key, value);
+        }
+    }
+
     const uploadResponse = await fetch(uploadUrl, {
         method: 'POST',
-        body: file
+        body: uploadForm
     });
 
     if (!uploadResponse.ok) {
@@ -1177,11 +1191,21 @@ async function convertViaAPI(file, sourceFmt, outputFmt, baseName) {
         throw new Error('转换超时，请稍后重试');
     }
 
-    // Step 5: Download result
+    // Step 5: Download result - re-fetch job to get export URL
     showProgress('下载转换结果...', file.name);
     updateProgress(95);
 
-    const exportUrl = jobData.data.tasks['export-file'].result.files[0].url;
+    const finalStatus = await fetch(`${baseUrl}/jobs/${jobId}`, {
+        headers: headers
+    });
+    const finalData = await finalStatus.json();
+    const exportTask = finalData.data.tasks['export-file'];
+    const exportUrl = exportTask?.result?.files?.[0]?.url;
+
+    if (!exportUrl) {
+        throw new Error('未获取到下载链接');
+    }
+
     const downloadResponse = await fetch(exportUrl);
 
     if (!downloadResponse.ok) {
