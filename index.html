@@ -1080,7 +1080,7 @@ async function convertViaAPI(file, sourceFmt, outputFmt, baseName) {
     const jobPayload = {
         tasks: {
             'import-file': {
-                operation: 'upload',
+                operation: 'import/upload',
                 filename: file.name
             },
             'convert-file': {
