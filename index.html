@@ -186,38 +186,55 @@ export default {
       const url = new URL(request.url);
       const path = url.pathname;
 
-      // POST /convert - 执行转换
-      if (path === '/convert' && request.method === 'POST') {
-        const formData = await request.formData();
+      // POST /jobs - 创建转换任务
+      if (path === '/jobs' && request.method === 'POST') {
+        const body = await request.text();
         
-        // 转发到 CloudConvert
-        const ccResponse = await fetch('https://api.cloudconvert.com/v2/convert', {
+        const ccResponse = await fetch('https://api.cloudconvert.com/v2/jobs', {
           method: 'POST',
           headers: {
             'Authorization': `Bearer ${API_KEY}`,
+            'Content-Type': 'application/json',
           },
-          body: formData,
+          body: body,
         });
 
-        if (!ccResponse.ok) {
-          const err = await ccResponse.text();
-          return new Response(JSON.stringify({ error: err }), {
-            status: ccResponse.status,
-            headers: corsHeaders,
-          });
-        }
-
         const data = await ccResponse.json();
-        return new Response(JSON.stringify(data), { headers: corsHeaders });
+        return new Response(JSON.stringify(data), {
+          status: ccResponse.status,
+          headers: corsHeaders,
+        });
       }
 
-      // GET /usage - 查询用量
-      if (path === '/usage') {
-        const ccResponse = await fetch('https://api.cloudconvert.com/v2/users/me', {
+      // POST /jobs/:id/start - 启动任务
+      if (path.match(/^\/jobs\/[^/]+\/start$/) && request.method === 'POST') {
+        const jobId = path.split('/')[2];
+        
+        const ccResponse = await fetch(`https://api.cloudconvert.com/v2/jobs/${jobId}/start`, {
+          method: 'POST',
           headers: { 'Authorization': `Bearer ${API_KEY}` },
         });
+
         const data = await ccResponse.json();
-        return new Response(JSON.stringify(data), { headers: corsHeaders });
+        return new Response(JSON.stringify(data), {
+          status: ccResponse.status,
+          headers: corsHeaders,
+        });
+      }
+
+      // GET /jobs/:id - 查询任务状态
+      if (path.match(/^\/jobs\/[^/]+$/) && request.method === 'GET') {
+        const jobId = path.split('/')[2];
+        
+        const ccResponse = await fetch(`https://api.cloudconvert.com/v2/jobs/${jobId}`, {
+          headers: { 'Authorization': `Bearer ${API_KEY}` },
+        });
+
+        const data = await ccResponse.json();
+        return new Response(JSON.stringify(data), {
+          status: ccResponse.status,
+          headers: corsHeaders,
+        });
       }
 
       return new Response(JSON.stringify({ error: 'Not found' }), {
@@ -1051,65 +1068,127 @@ async function convertViaAPI(file, sourceFmt, outputFmt, baseName) {
         throw new Error('CloudConvert 免费额度已用完 (25次/天)，请明天再试');
     }
 
-    showProgress('上传文件到 CloudConvert...', file.name);
-    updateProgress(20);
+    const apiKey = state.settings.apiKey;
+    const proxyUrl = state.settings.proxyUrl;
+    const baseUrl = proxyUrl || 'https://api.cloudconvert.com/v2';
+    const headers = proxyUrl ? {} : { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' };
 
-    const formData = new FormData();
-    formData.append('file', file);
-    formData.append('input_format', sourceFmt);
-    formData.append('output_format', outputFmt);
-    formData.append('wait', 'true');
-    formData.append('download', 'true');
+    // Step 1: Create job with tasks
+    showProgress('创建转换任务...', file.name);
+    updateProgress(10);
 
-    let response;
+    const jobPayload = {
+        tasks: {
+            'import-file': {
+                operation: 'upload',
+                filename: file.name
+            },
+            'convert-file': {
+                operation: 'convert',
+                input: 'import-file',
+                input_format: sourceFmt,
+                output_format: outputFmt
+            },
+            'export-file': {
+                operation: 'export/url',
+                input: 'convert-file'
+            }
+        }
+    };
 
-    if (state.settings.proxyUrl) {
-        // Via Cloudflare Worker proxy
-        response = await fetch(state.settings.proxyUrl + '/convert', {
-            method: 'POST',
-            body: formData,
-        });
-    } else {
-        // Direct API call
-        response = await fetch('https://api.cloudconvert.com/v2/convert', {
-            method: 'POST',
-            headers: { 'Authorization': `Bearer ${state.settings.apiKey}` },
-            body: formData,
-        });
-    }
+    const jobResponse = await fetch(`${baseUrl}/jobs`, {
+        method: 'POST',
+        headers: headers,
+        body: JSON.stringify(jobPayload)
+    });
 
-    updateProgress(70);
-    showProgress('等待 CloudConvert 处理...', file.name);
-
-    if (!response.ok) {
-        const errText = await response.text();
-        let errMsg = `API 错误 (${response.status})`;
+    if (!jobResponse.ok) {
+        const errText = await jobResponse.text();
+        let errMsg = `API 错误 (${jobResponse.status})`;
         try {
             const errJson = JSON.parse(errText);
-            errMsg = errJson.message || errJson.error || errMsg;
+            errMsg = errJson.message || errMsg;
         } catch {}
         throw new Error(errMsg);
     }
 
-    const result = await response.json();
-    updateProgress(90);
+    const jobData = await jobResponse.json();
+    const jobId = jobData.data.id;
+    const uploadUrl = jobData.data.tasks['import-file'].result.form.url;
 
-    // The result should contain a download URL or the file data
-    let blob;
-    if (result.url || result.link) {
-        const downloadUrl = result.url || result.link;
-        showProgress('下载转换结果...', file.name);
-        const dlResponse = await fetch(downloadUrl);
-        blob = await dlResponse.blob();
-    } else if (result.data) {
-        // Base64 encoded result
-        const binary = atob(result.data);
-        const bytes = new Uint8Array(binary.length);
-        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-        blob = new Blob([bytes]);
-    } else {
-        throw new Error('API 返回格式异常，请检查 CloudConvert 账户状态');
+    // Step 2: Upload file
+    showProgress('上传文件...', file.name);
+    updateProgress(30);
+
+    const uploadResponse = await fetch(uploadUrl, {
+        method: 'POST',
+        body: file
+    });
+
+    if (!uploadResponse.ok) {
+        throw new Error('文件上传失败');
     }
+
+    // Step 3: Start job
+    showProgress('开始转换...', file.name);
+    updateProgress(50);
+
+    const startResponse = await fetch(`${baseUrl}/jobs/${jobId}/start`, {
+        method: 'POST',
+        headers: headers
+    });
+
+    if (!startResponse.ok) {
+        throw new Error('启动转换任务失败');
+    }
+
+    // Step 4: Poll for completion
+    showProgress('等待 CloudConvert 处理...', file.name);
+    updateProgress(70);
+
+    let jobStatus = 'processing';
+    let attempts = 0;
+    const maxAttempts = 60; // 60 * 2s = 120s timeout
+
+    while (jobStatus === 'processing' && attempts < maxAttempts) {
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        attempts++;
+
+        const statusResponse = await fetch(`${baseUrl}/jobs/${jobId}`, {
+            headers: headers
+        });
+
+        if (!statusResponse.ok) {
+            throw new Error('查询任务状态失败');
+        }
+
+        const statusData = await statusResponse.json();
+        jobStatus = statusData.data.status;
+
+        if (jobStatus === 'error') {
+            const errorMsg = statusData.data.tasks?.['convert-file']?.message || '转换失败';
+            throw new Error(errorMsg);
+        }
+
+        updateProgress(70 + (attempts / maxAttempts) * 20);
+    }
+
+    if (jobStatus !== 'finished') {
+        throw new Error('转换超时，请稍后重试');
+    }
+
+    // Step 5: Download result
+    showProgress('下载转换结果...', file.name);
+    updateProgress(95);
+
+    const exportUrl = jobData.data.tasks['export-file'].result.files[0].url;
+    const downloadResponse = await fetch(exportUrl);
+
+    if (!downloadResponse.ok) {
+        throw new Error('下载转换结果失败');
+    }
+
+    const blob = await downloadResponse.blob();
 
     // Update usage
     state.apiUsage.count++;
