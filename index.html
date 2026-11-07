@@ -1113,12 +1113,22 @@ async function convertViaAPI(file, sourceFmt, outputFmt, baseName) {
     }
 
     const jobData = await jobResponse.json();
+    console.log('Job creation response:', JSON.stringify(jobData, null, 2));
+
     const jobId = jobData.data.id;
-    const uploadTask = jobData.data.tasks['import-file'];
+    const tasks = jobData.data.tasks;
+
+    // Find the import task - key might vary
+    const importTaskKey = Object.keys(tasks).find(k => tasks[k].operation === 'import/upload');
+    if (!importTaskKey) {
+        throw new Error('未找到上传任务，API 响应: ' + JSON.stringify(Object.keys(tasks)));
+    }
+
+    const uploadTask = tasks[importTaskKey];
     const uploadUrl = uploadTask.result?.form?.url;
 
     if (!uploadUrl) {
-        throw new Error('未获取到上传地址，请检查 API Key 权限');
+        throw new Error('未获取到上传地址，任务状态: ' + uploadTask.status);
     }
 
     // Step 2: Upload file
@@ -1199,7 +1209,15 @@ async function convertViaAPI(file, sourceFmt, outputFmt, baseName) {
         headers: headers
     });
     const finalData = await finalStatus.json();
-    const exportTask = finalData.data.tasks['export-file'];
+    console.log('Job completed response:', JSON.stringify(finalData, null, 2));
+
+    const finalTasks = finalData.data.tasks;
+    const exportTaskKey = Object.keys(finalTasks).find(k => finalTasks[k].operation === 'export/url');
+    if (!exportTaskKey) {
+        throw new Error('未找到导出任务');
+    }
+
+    const exportTask = finalTasks[exportTaskKey];
     const exportUrl = exportTask?.result?.files?.[0]?.url;
 
     if (!exportUrl) {
