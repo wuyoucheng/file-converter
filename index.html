@@ -1157,24 +1157,9 @@ async function convertViaAPI(file, sourceFmt, outputFmt, baseName) {
         throw new Error(`文件上传失败 (${uploadResponse.status}): ${errDetail.slice(0, 200)}`);
     }
 
-    // Step 3: Start job
-    showProgress('开始转换...', file.name);
-    updateProgress(50);
-
-    const startResponse = await fetch(`${baseUrl}/jobs/${jobId}/start`, {
-        method: 'POST',
-        headers: headers
-    });
-
-    if (!startResponse.ok) {
-        const errDetail = await startResponse.text();
-        console.error('Start job failed:', startResponse.status, errDetail);
-        throw new Error(`启动转换任务失败 (${startResponse.status}): ${errDetail.slice(0, 200)}`);
-    }
-
-    // Step 4: Poll for completion
+    // Step 3: Poll for completion (job auto-starts after upload)
     showProgress('等待 CloudConvert 处理...', file.name);
-    updateProgress(70);
+    updateProgress(50);
 
     let jobStatus = 'processing';
     let attempts = 0;
