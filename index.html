@@ -1138,13 +1138,13 @@ async function convertViaAPI(file, sourceFmt, outputFmt, baseName) {
     updateProgress(30);
 
     const uploadForm = new FormData();
-    uploadForm.append('file', file);
-    // Add any additional form fields from the upload task
+    // S3 POST requires parameters before file
     if (uploadTask.result?.form?.parameters) {
         for (const [key, value] of Object.entries(uploadTask.result.form.parameters)) {
             uploadForm.append(key, value);
         }
     }
+    uploadForm.append('file', file);
 
     const uploadResponse = await fetch(uploadUrl, {
         method: 'POST',
