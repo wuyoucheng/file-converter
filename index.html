@@ -1127,6 +1127,8 @@ async function convertViaAPI(file, sourceFmt, outputFmt, baseName) {
     const uploadTask = tasks[importTaskKey];
     const uploadUrl = uploadTask.result?.form?.url;
 
+    console.log('Upload task:', JSON.stringify(uploadTask, null, 2));
+
     if (!uploadUrl) {
         throw new Error('未获取到上传地址，任务状态: ' + uploadTask.status);
     }
@@ -1150,7 +1152,9 @@ async function convertViaAPI(file, sourceFmt, outputFmt, baseName) {
     });
 
     if (!uploadResponse.ok) {
-        throw new Error('文件上传失败');
+        const errDetail = await uploadResponse.text();
+        console.error('Upload failed:', uploadResponse.status, errDetail);
+        throw new Error(`文件上传失败 (${uploadResponse.status}): ${errDetail.slice(0, 200)}`);
     }
 
     // Step 3: Start job
