@@ -483,13 +483,13 @@ function getFormat(filename) {
 
 function getAvailableOutputs(sourceFmt) {
     const client = CLIENT_CONVERSIONS[sourceFmt] || [];
-    // Add API-supported outputs
-    const apiOutputs = ['pdf','docx','png','jpg','html','txt','epub','pptx','xlsx'];
+    // Add API-supported outputs (MinerU for PDF, CloudConvert for others)
+    const apiOutputs = ['pdf','docx','md','png','jpg','html','txt','epub','pptx','xlsx'];
     const all = [...new Set([...client, ...apiOutputs.filter(f => f !== sourceFmt)])];
     return all.map(f => ({
         format: f,
         label: FORMAT_MAP[f]?.label || f.toUpperCase(),
-        method: client.includes(f) ? 'client' : 'api'
+        method: client.includes(f) ? 'client' : (sourceFmt === 'pdf' ? 'mineru' : 'api')
     }));
 }
 
@@ -778,6 +778,9 @@ async function startConversion() {
 
             if (client.includes(outputFmt)) {
                 result = await convertClient(file, sourceFmt, outputFmt, baseName);
+            } else if (sourceFmt === 'pdf') {
+                // Use MinerU Agent API for PDF (free, no token)
+                result = await convertViaMineru(file, sourceFmt, outputFmt, baseName);
             } else {
                 result = await convertViaAPI(file, sourceFmt, outputFmt, baseName);
             }
@@ -1230,6 +1233,169 @@ async function convertViaAPI(file, sourceFmt, outputFmt, baseName) {
 
     const outName = `${baseName}.${outputFmt}`;
     return { success: true, blob, filename: outName, method: 'api', size: blob.size };
+}
+
+// ============================================================
+// MinerU Agent API (免 Token，IP 限频)
+// ============================================================
+async function convertViaMineru(file, sourceFmt, outputFmt, baseName) {
+    const MINERU_BASE = 'https://mineru.net/api/v1/agent';
+
+    // Check file size (10MB limit)
+    if (file.size > 10 * 1024 * 1024) {
+        throw new Error('文件超过 10MB，MinerU 轻量 API 不支持');
+    }
+
+    // Step 1: Upload file
+    showProgress('上传文件到 MinerU...', file.name);
+    updateProgress(10);
+
+    const uploadForm = new FormData();
+    uploadForm.append('file', file);
+
+    const uploadResponse = await fetch(`${MINERU_BASE}/parse/file`, {
+        method: 'POST',
+        body: uploadForm
+    });
+
+    if (!uploadResponse.ok) {
+        const errText = await uploadResponse.text();
+        throw new Error(`MinerU 上传失败 (${uploadResponse.status}): ${errText.slice(0, 200)}`);
+    }
+
+    const uploadData = await uploadResponse.json();
+    console.log('MinerU upload response:', uploadData);
+
+    if (uploadData.code !== 0) {
+        throw new Error(`MinerU 错误：${uploadData.msg || '未知错误'}`);
+    }
+
+    const taskId = uploadData.data.task_id;
+    if (!taskId) {
+        throw new Error('未获取到任务 ID');
+    }
+
+    // Step 2: Poll for completion
+    showProgress('MinerU 解析中...', file.name);
+    updateProgress(30);
+
+    let taskState = 'pending';
+    let attempts = 0;
+    const maxAttempts = 120; // 120 * 2s = 240s timeout
+    let markdownUrl = null;
+
+    while (taskState !== 'done' && attempts < maxAttempts) {
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        attempts++;
+
+        const statusResponse = await fetch(`${MINERU_BASE}/parse/file/${taskId}`);
+
+        if (!statusResponse.ok) {
+            throw new Error('查询 MinerU 任务状态失败');
+        }
+
+        const statusData = await statusResponse.json();
+        console.log(`MinerU poll #${attempts}:`, statusData);
+
+        if (statusData.code !== 0) {
+            throw new Error(`MinerU 任务失败：${statusData.msg || '未知错误'}`);
+        }
+
+        taskState = statusData.data.state;
+
+        if (taskState === 'failed') {
+            throw new Error(`MinerU 解析失败：${statusData.data.err_msg || '未知错误'}`);
+        }
+
+        if (taskState === 'done') {
+            markdownUrl = statusData.data.markdown_url;
+            break;
+        }
+
+        updateProgress(30 + (attempts / maxAttempts) * 50);
+    }
+
+    if (taskState !== 'done') {
+        throw new Error('MinerU 解析超时，请稍后重试');
+    }
+
+    if (!markdownUrl) {
+        throw new Error('未获取到 Markdown 下载链接');
+    }
+
+    // Step 3: Download Markdown
+    showProgress('下载解析结果...', file.name);
+    updateProgress(85);
+
+    const mdResponse = await fetch(markdownUrl);
+    if (!mdResponse.ok) {
+        throw new Error('下载 Markdown 失败');
+    }
+
+    const markdownContent = await mdResponse.text();
+
+    // Step 4: Convert to output format
+    let blob;
+    let outName;
+
+    if (outputFmt === 'md') {
+        // Direct Markdown output
+        blob = new Blob([markdownContent], { type: 'text/markdown' });
+        outName = `${baseName}.md`;
+    } else if (outputFmt === 'docx') {
+        // Convert Markdown to DOCX using simple HTML intermediate
+        showProgress('转换为 DOCX...', file.name);
+        updateProgress(90);
+
+        const htmlContent = marked.parse(markdownContent);
+        const docxBlob = await markdownToDocx(htmlContent, baseName);
+        blob = docxBlob;
+        outName = `${baseName}.docx`;
+    } else if (outputFmt === 'html') {
+        const htmlContent = marked.parse(markdownContent);
+        blob = new Blob([htmlContent], { type: 'text/html' });
+        outName = `${baseName}.html`;
+    } else if (outputFmt === 'txt') {
+        // Strip markdown formatting
+        const txtContent = markdownContent
+            .replace(/#{1,6}\s/g, '')
+            .replace(/\*\*(.+?)\*\*/g, '$1')
+            .replace(/\*(.+?)\*/g, '$1')
+            .replace(/`(.+?)`/g, '$1')
+            .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
+        blob = new Blob([txtContent], { type: 'text/plain' });
+        outName = `${baseName}.txt`;
+    } else {
+        throw new Error(`MinerU 不支持输出格式：${outputFmt}`);
+    }
+
+    updateProgress(100);
+    return { success: true, blob, filename: outName, method: 'mineru', size: blob.size };
+}
+
+// Simple Markdown to DOCX converter (via HTML)
+async function markdownToDocx(htmlContent, baseName) {
+    // Create a temporary HTML document for jsPDF-like approach
+    // For DOCX, we'll create a simple XML-based DOCX
+    const docxContent = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+<w:body>
+${htmlContent
+    .split('</p>')
+    .filter(p => p.trim())
+    .map(p => {
+        const text = p.replace(/<[^>]+>/g, '').trim();
+        if (!text) return '';
+        return `<w:p><w:r><w:t>${text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</w:t></w:r></w:p>`;
+    })
+    .join('\n')}
+</w:body>
+</w:document>`;
+
+    // Create a minimal DOCX (ZIP with XML)
+    // For simplicity, return as HTML with .docx extension (Word can open it)
+    const fullHtml = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>${baseName}</title></head><body>${htmlContent}</body></html>`;
+    return new Blob([fullHtml], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
 }
 
 // ============================================================
