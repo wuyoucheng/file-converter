@@ -1167,7 +1167,9 @@ async function convertViaAPI(file, sourceFmt, outputFmt, baseName) {
     });
 
     if (!startResponse.ok) {
-        throw new Error('启动转换任务失败');
+        const errDetail = await startResponse.text();
+        console.error('Start job failed:', startResponse.status, errDetail);
+        throw new Error(`启动转换任务失败 (${startResponse.status}): ${errDetail.slice(0, 200)}`);
     }
 
     // Step 4: Poll for completion
