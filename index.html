@@ -364,7 +364,10 @@ const state = {
 // 否则改一处漏一处就会出 bug。
 // ============================================================
 const MINERU_OUTPUTS = ['md', 'docx', 'html', 'txt']; // MinerU 只能产出文本类格式
-const WORKER_CODE_URL = 'https://raw.githubusercontent.com/yellowcat-ai/file-converter/main/worker/proxy.js';
+// Worker 代码就放在仓库 worker/proxy.js，Pages 发布的是整个仓库，所以同源取就行
+// （raw.githubusercontent.com 在国内经常连不通，别依赖它）。
+const WORKER_CODE_PATH = 'worker/proxy.js';
+const WORKER_CODE_FALLBACK = 'https://github.com/yellowcat-ai/file-converter/blob/main/worker/proxy.js';
 
 // MinerU 精准解析 API 的 token 放在 Worker 上，所以没配代理就用不了
 function mineruAvailable() {
@@ -1748,13 +1751,14 @@ async function loadWorkerCode() {
     const render = (text) => { block.textContent = text; };
     if (workerCodeCache) { render(workerCodeCache); return; }
     render('正在加载 Worker 代码...');
+    const url = new URL(WORKER_CODE_PATH, location.href).href;
     try {
-        const res = await fetch(WORKER_CODE_URL, { cache: 'no-store' });
+        const res = await fetch(url, { cache: 'no-store' });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         workerCodeCache = await res.text();
         render(workerCodeCache);
     } catch (e) {
-        render(`代码加载失败（${e.message}）。\n请直接在 GitHub 打开：\n${WORKER_CODE_URL}`);
+        render(`代码加载失败（${e.message}）。\n请直接在 GitHub 打开：\n${WORKER_CODE_FALLBACK}`);
     }
 }
 
