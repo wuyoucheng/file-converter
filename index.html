@@ -11,6 +11,7 @@
     <script src="https://cdn.jsdelivr.net/npm/marked@15.0.0/marked.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.2/dist/jspdf.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
     <script src="https://unpkg.com/lucide@0.460.0/dist/umd/lucide.min.js"></script>
     <script>
         tailwind.config = {
@@ -107,16 +108,17 @@
 
             <!-- Cloudflare Worker Proxy -->
             <div class="mb-6">
-                <label class="block text-sm font-medium mb-2">Cloudflare Worker 代理 <span class="text-xs text-gray-400">(可选)</span></label>
+                <label class="block text-sm font-medium mb-2">Cloudflare Worker 代理 <span class="text-xs text-gray-400">(PDF 高精度转换必需)</span></label>
                 <p class="text-xs text-gray-500 dark:text-gray-400 mb-2">
-                    部署 Worker 代理可避免 API Key 暴露在浏览器端。
+                    配好代理后 PDF→DOCX/MD/HTML 才会走 MinerU 精准解析（版面和中文 OCR 明显更好），密钥也不会暴露在浏览器里。
                     <a href="#" onclick="showWorkerCode();return false" class="text-primary-500 underline">查看 Worker 代码</a>
                 </p>
                 <input type="url" id="proxyUrlInput" placeholder="https://your-worker.your-name.workers.dev"
                     class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-sm focus:ring-2 focus:ring-primary-500 focus:border-transparent outline-none">
                 <button onclick="saveProxyUrl()" class="mt-2 w-full py-2 bg-gray-200 dark:bg-gray-600 text-gray-700 dark:text-gray-200 rounded-lg text-sm font-medium hover:bg-gray-300 dark:hover:bg-gray-500 transition">
-                    保存代理地址
+                    保存并检测代理
                 </button>
+                <p id="proxyHealth" class="mt-2 text-xs text-gray-500 dark:text-gray-400 hidden"></p>
             </div>
 
             <!-- Default Output Format -->
@@ -155,101 +157,22 @@
         </div>
         <div class="flex-1 overflow-y-auto p-4">
             <p class="text-sm text-gray-500 dark:text-gray-400 mb-3">
-                1. 登录 <a href="https://dash.cloudflare.com" target="_blank" class="text-primary-500 underline">Cloudflare Dashboard</a>
-                → Workers & Pages → 创建 Worker<br>
-                2. 粘贴以下代码，将 YOUR_API_KEY 替换为你的 CloudConvert API Key<br>
-                3. 部署后把 Worker 地址填入上方"代理地址"输入框
+                这个代理把 CloudConvert 和 MinerU 的密钥留在服务端，并帮浏览器绕过 OSS/CDN 的跨域限制。
+                <b>MinerU 精准解析必须配好代理才能用</b>（token 不能放进前端代码，且每 14 天过期一次）。<br>
+                1. 打开 <a href="https://dash.cloudflare.com" target="_blank" class="text-primary-500 underline">Cloudflare Dashboard</a>
+                → Workers &amp; Pages → 创建 Worker；<br>
+                2. 粘贴下面这份代码，在 Settings → Variables 里加两个 Secret：<code class="px-1 rounded bg-gray-100 dark:bg-gray-700">CLOUDCONVERT_API_KEY</code>、<code class="px-1 rounded bg-gray-100 dark:bg-gray-700">MINERU_API_TOKEN</code>，部署；<br>
+                3. 把 Worker 地址填回上方"代理地址"输入框并保存。<br>
+                MinerU token 到 <a href="https://mineru.net/apiManage/token" target="_blank" class="text-primary-500 underline">这里</a>领取，过期后只需更新 Secret，不用重新部署。
             </p>
-            <pre class="bg-gray-900 text-green-400 p-4 rounded-lg text-xs overflow-x-auto leading-relaxed"><code>// cloudflare-worker.js
-// Cloudflare Worker - CloudConvert API 代理
-// 部署: wrangler deploy 或通过 Cloudflare Dashboard
-
-export default {
-  async fetch(request, env) {
-    // CORS
-    if (request.method === 'OPTIONS') {
-      return new Response(null, {
-        headers: {
-          'Access-Control-Allow-Origin': '*',
-          'Access-Control-Allow-Methods': 'POST, GET, OPTIONS',
-          'Access-Control-Allow-Headers': 'Content-Type',
-        }
-      });
-    }
-
-    const API_KEY = env.CLOUDCONVERT_API_KEY || 'YOUR_API_KEY';
-    const corsHeaders = {
-      'Access-Control-Allow-Origin': '*',
-      'Content-Type': 'application/json',
-    };
-
-    try {
-      const url = new URL(request.url);
-      const path = url.pathname;
-
-      // POST /jobs - 创建转换任务
-      if (path === '/jobs' && request.method === 'POST') {
-        const body = await request.text();
-        
-        const ccResponse = await fetch('https://api.cloudconvert.com/v2/jobs', {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${API_KEY}`,
-            'Content-Type': 'application/json',
-          },
-          body: body,
-        });
-
-        const data = await ccResponse.json();
-        return new Response(JSON.stringify(data), {
-          status: ccResponse.status,
-          headers: corsHeaders,
-        });
-      }
-
-      // POST /jobs/:id/start - 启动任务
-      if (path.match(/^\/jobs\/[^/]+\/start$/) && request.method === 'POST') {
-        const jobId = path.split('/')[2];
-        
-        const ccResponse = await fetch(`https://api.cloudconvert.com/v2/jobs/${jobId}/start`, {
-          method: 'POST',
-          headers: { 'Authorization': `Bearer ${API_KEY}` },
-        });
-
-        const data = await ccResponse.json();
-        return new Response(JSON.stringify(data), {
-          status: ccResponse.status,
-          headers: corsHeaders,
-        });
-      }
-
-      // GET /jobs/:id - 查询任务状态
-      if (path.match(/^\/jobs\/[^/]+$/) && request.method === 'GET') {
-        const jobId = path.split('/')[2];
-        
-        const ccResponse = await fetch(`https://api.cloudconvert.com/v2/jobs/${jobId}`, {
-          headers: { 'Authorization': `Bearer ${API_KEY}` },
-        });
-
-        const data = await ccResponse.json();
-        return new Response(JSON.stringify(data), {
-          status: ccResponse.status,
-          headers: corsHeaders,
-        });
-      }
-
-      return new Response(JSON.stringify({ error: 'Not found' }), {
-        status: 404,
-        headers: corsHeaders,
-      });
-    } catch (e) {
-      return new Response(JSON.stringify({ error: e.message }), {
-        status: 500,
-        headers: corsHeaders,
-      });
-    }
-  }
-};</code></pre>
+            <div class="flex items-center gap-2 mb-2">
+                <button onclick="copyWorkerCode()" class="px-3 py-1.5 bg-primary-500 text-white rounded-lg text-xs font-medium hover:bg-primary-600 transition">
+                    复制代码
+                </button>
+                <a href="https://github.com/yellowcat-ai/file-converter/blob/main/worker/proxy.js" target="_blank"
+                   class="text-xs text-primary-500 underline">在 GitHub 查看 worker/proxy.js</a>
+            </div>
+            <pre id="workerCodeBlock" class="bg-gray-900 text-green-400 p-4 rounded-lg text-xs overflow-x-auto leading-relaxed whitespace-pre"><code>正在加载 Worker 代码...</code></pre>
         </div>
     </div>
 </div>
@@ -303,6 +226,12 @@ export default {
                 转换设置
             </h3>
             <span id="conversionMethod" class="format-badge"></span>
+        </div>
+
+        <div id="pdfEngineHint" class="hidden -mt-1 mb-4 text-xs leading-relaxed text-amber-600 dark:text-amber-400">
+            这份 PDF 目前只能走 CloudConvert，转 DOCX 效果一般。部署 Worker 代理并配上 MinerU token 后，
+            PDF→DOCX/MD/HTML 会改用 MinerU 精准解析，版面还原和中文识别明显更好。
+            <a href="#" onclick="toggleSettings();return false" class="underline font-medium">去设置</a>
         </div>
 
         <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
@@ -373,13 +302,15 @@ export default {
                     <li>Markdown → HTML, TXT</li>
                     <li>HTML → TXT</li>
                     <li>SVG → PNG, JPEG, WebP</li>
-                    <li>PNG / JPEG / WebP / BMP / GIF → 互转, PDF</li>
+                    <li>PNG / JPEG / WebP / BMP / GIF → 互转, PDF（GIF 取首帧）</li>
+                    <li>导出 GIF 走 CloudConvert（浏览器 canvas 编不了 GIF）</li>
                 </ul>
             </div>
             <div>
                 <h4 class="font-medium text-xs text-gray-500 uppercase tracking-wider mb-2">API 转换 <span class="format-badge badge-api ml-1">MinerU + CloudConvert</span></h4>
                 <ul class="space-y-1 text-gray-600 dark:text-gray-400">
-                    <li>PDF → MD, DOCX, HTML, TXT, PNG, JPG (MinerU 优先)</li>
+                    <li>PDF → DOCX, MD, HTML, TXT（配好代理后走 MinerU，精度更高）</li>
+                    <li>PDF → PNG, JPG, EPUB, PPTX（CloudConvert）</li>
                     <li>DOCX → PDF, HTML, TXT, PNG, JPG</li>
                     <li>XLSX → PDF, CSV, HTML, PNG</li>
                     <li>PPTX → PDF, PNG, JPG, HTML</li>
@@ -391,10 +322,11 @@ export default {
                 <h4 class="font-medium text-xs text-gray-500 uppercase tracking-wider mb-2">限制说明</h4>
                 <ul class="space-y-1 text-gray-600 dark:text-gray-400">
                     <li>客户端转换: 无限制，离线可用</li>
-                    <li>MinerU 轻量 API: 免费，IP 限频，10MB/20页</li>
+                    <li>MinerU 精准解析: 需在 Worker 上配 token，免费 1000 页/天，单文件 ≤200 页</li>
+                    <li>MinerU token 每 14 天过期，过期后更新 Worker Secret 即可</li>
                     <li>CloudConvert 免费版: 25 次/天</li>
                     <li>单文件最大: 客户端 50MB / API 100MB</li>
-                    <li>API Key 仅存在浏览器本地</li>
+                    <li>API Key 仅存在浏览器本地；配了 Worker 则由 Worker 持有密钥</li>
                 </ul>
             </div>
         </div>
@@ -424,6 +356,24 @@ const state = {
         darkMode: localStorage.getItem('ff_dark') === 'true',
     }
 };
+
+// ============================================================
+// 转换引擎判定（唯一入口）
+// ------------------------------------------------------------
+// 路由、下拉分组、方法徽标都调用这里，不要再各自写一遍格式数组，
+// 否则改一处漏一处就会出 bug。
+// ============================================================
+const MINERU_OUTPUTS = ['md', 'docx', 'html', 'txt']; // MinerU 只能产出文本类格式
+const WORKER_CODE_URL = 'https://raw.githubusercontent.com/yellowcat-ai/file-converter/main/worker/proxy.js';
+
+// MinerU 精准解析 API 的 token 放在 Worker 上，所以没配代理就用不了
+function mineruAvailable() {
+    return Boolean(state.settings.proxyUrl);
+}
+
+function mineruHandles(sourceFmt, outputFmt) {
+    return sourceFmt === 'pdf' && MINERU_OUTPUTS.includes(outputFmt) && mineruAvailable();
+}
 
 // ============================================================
 // Format Registry
@@ -472,12 +422,14 @@ const CLIENT_CONVERSIONS = {
     'html':  ['txt'],
     'htm':   ['txt'],
     'svg':   ['png','jpg','webp'],
-    'png':   ['jpg','webp','gif','pdf'],
-    'jpg':   ['png','webp','gif','pdf'],
-    'jpeg':  ['png','webp','gif','pdf'],
+    // 注意：canvas.toBlob 不支持 image/gif，会静默退化成 PNG，
+    // 所以 gif 只能作为源，不能作为客户端输出（要转 gif 走 CloudConvert）。
+    'png':   ['jpg','webp','pdf'],
+    'jpg':   ['png','webp','pdf'],
+    'jpeg':  ['png','webp','pdf'],
     'webp':  ['png','jpg','pdf'],
     'bmp':   ['png','jpg','webp','pdf'],
-    'gif':   ['png','jpg','webp'],
+    'gif':   ['png','jpg','webp','pdf'],
 };
 
 function getFormat(filename) {
@@ -486,14 +438,12 @@ function getFormat(filename) {
 
 function getAvailableOutputs(sourceFmt) {
     const client = CLIENT_CONVERSIONS[sourceFmt] || [];
-    // Add API-supported outputs (MinerU for PDF text outputs, CloudConvert for others)
     const apiOutputs = ['pdf','docx','md','png','jpg','html','txt','epub','pptx','xlsx'];
-    const mineruOutputs = ['md','docx','html','txt']; // MinerU only supports text-based outputs
     const all = [...new Set([...client, ...apiOutputs.filter(f => f !== sourceFmt)])];
     return all.map(f => ({
         format: f,
         label: FORMAT_MAP[f]?.label || f.toUpperCase(),
-        method: client.includes(f) ? 'client' : (sourceFmt === 'pdf' && mineruOutputs.includes(f) ? 'mineru' : 'api')
+        method: client.includes(f) ? 'client' : (mineruHandles(sourceFmt, f) ? 'mineru' : 'api')
     }));
 }
 
@@ -511,6 +461,9 @@ function init() {
 
     // Update usage display
     updateUsageDisplay();
+
+    // 已配置过代理的话，顺手确认上游密钥状态
+    if (state.settings.proxyUrl) checkProxyHealth();
 
     // File input handlers
     const dropZone = document.getElementById('dropZone');
@@ -621,9 +574,9 @@ function showConversionConfig(file) {
     select.parentNode.replaceChild(newSelect, select);
     select = newSelect;
 
-    // Group by method (treat 'mineru' as 'api' for grouping)
+    // Group by method（mineru 也归到 API 组，否则这些项在两个组里都放不下）
     const clientOutputs = outputs.filter(o => o.method === 'client');
-    const apiOutputs = outputs.filter(o => o.method === 'api' || o.method === 'mineru');
+    const apiOutputs = outputs.filter(o => o.method !== 'client');
 
     if (clientOutputs.length > 0) {
         const group = document.createElement('optgroup');
@@ -640,7 +593,9 @@ function showConversionConfig(file) {
 
     if (apiOutputs.length > 0) {
         const group = document.createElement('optgroup');
-        group.label = sourceFmt === 'pdf' ? 'API 转换 (MinerU / CloudConvert)' : 'API 转换 (CloudConvert)';
+        group.label = apiOutputs.some(o => o.method === 'mineru')
+            ? 'API 转换 (MinerU 高精度 / CloudConvert)'
+            : 'API 转换 (CloudConvert)';
         apiOutputs.forEach(o => {
             const opt = document.createElement('option');
             opt.value = o.format;
@@ -673,15 +628,20 @@ function getDefaultOutput(sourceFmt) {
 function updateMethodBadge(sourceFmt, outputFmt) {
     const badge = document.getElementById('conversionMethod');
     const client = CLIENT_CONVERSIONS[sourceFmt] || [];
+    const hint = document.getElementById('pdfEngineHint');
+    if (hint) {
+        const wouldBenefit = sourceFmt === 'pdf' && MINERU_OUTPUTS.includes(outputFmt);
+        hint.classList.toggle('hidden', !(wouldBenefit && !mineruAvailable()));
+    }
     if (client.includes(outputFmt)) {
         badge.className = 'format-badge badge-client';
-        badge.textContent = '客户端转换';
-    } else if (sourceFmt === 'pdf' && ['md','docx','html','txt'].includes(outputFmt)) {
+        badge.textContent = engineLabel('client');
+    } else if (mineruHandles(sourceFmt, outputFmt)) {
         badge.className = 'format-badge badge-api';
-        badge.textContent = 'MinerU 解析';
+        badge.textContent = engineLabel('mineru');
     } else {
         badge.className = 'format-badge badge-api';
-        badge.textContent = 'CloudConvert';
+        badge.textContent = engineLabel('api');
     }
 }
 
@@ -785,14 +745,20 @@ async function startConversion() {
 
             if (client.includes(outputFmt)) {
                 result = await convertClient(file, sourceFmt, outputFmt, baseName);
-            } else if (sourceFmt === 'pdf' && ['md','docx','html','txt'].includes(outputFmt)) {
-                // Use MinerU Agent API for text-based outputs (free, better quality)
+            } else if (mineruHandles(sourceFmt, outputFmt)) {
+                // MinerU 精准解析（真 DOCX / 版面还原），失败则退回 CloudConvert
                 try {
                     result = await convertViaMineru(file, sourceFmt, outputFmt, baseName);
                 } catch (mineruErr) {
                     console.warn('MinerU failed, falling back to CloudConvert:', mineruErr.message);
                     showProgress('MinerU 不可用，切换到 CloudConvert...', file.name);
-                    result = await convertViaAPI(file, sourceFmt, outputFmt, baseName);
+                    try {
+                        result = await convertViaAPI(file, sourceFmt, outputFmt, baseName);
+                        result.warning = mineruErr.message;
+                    } catch (apiErr) {
+                        // 两条路都断了就把两边的原因都说出来，否则用户只看到一句没头没尾的 fetch 失败
+                        throw new Error(`MinerU：${mineruErr.message}；退回 CloudConvert 也失败：${apiErr.message}`);
+                    }
                 }
             } else {
                 result = await convertViaAPI(file, sourceFmt, outputFmt, baseName);
@@ -1011,8 +977,20 @@ async function convertImage(arrayBuffer, mimeType, outputFmt) {
     ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
 
     const outMime = outputFmt === 'jpg' || outputFmt === 'jpeg' ? 'image/jpeg' : `image/${outputFmt}`;
-    return new Promise((resolve) => {
-        canvas.toBlob(resolve, outMime, quality);
+    return new Promise((resolve, reject) => {
+        canvas.toBlob((outBlob) => {
+            if (!outBlob) {
+                reject(new Error(`浏览器无法编码 ${outputFmt.toUpperCase()}`));
+                return;
+            }
+            // toBlob 遇到不支持的 MIME 会静默退回 PNG（gif 就是这样），
+            // 不核对就会得到一个挂错扩展名的文件。
+            if (outBlob.type && outBlob.type !== outMime) {
+                reject(new Error(`浏览器不支持导出 ${outputFmt.toUpperCase()}（只会得到 ${outBlob.type}），请改用 API 转换`));
+                return;
+            }
+            resolve(outBlob);
+        }, outMime, quality);
     });
 }
 
@@ -1259,177 +1237,270 @@ async function convertViaAPI(file, sourceFmt, outputFmt, baseName) {
 }
 
 // ============================================================
-// MinerU Agent API (免 Token，IP 限频)
+// MinerU 精准解析 API v4（必须经 Worker 代理，token 在前端拿不到）
+// 流程：申请上传地址 → PUT 到 OSS → 轮询批次 → 下载结果 zip → 取出目标文件
 // ============================================================
+const MINERU_DOCX_MIME = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+
 async function convertViaMineru(file, sourceFmt, outputFmt, baseName) {
-    const MINERU_BASE = 'https://mineru.net/api/v1/agent';
+    const proxy = state.settings.proxyUrl;
+    if (!proxy) throw new Error('MinerU 精准解析需要先配置 Worker 代理');
+    if (typeof JSZip === 'undefined') throw new Error('解压库 JSZip 加载失败，请刷新页面重试');
+    if (file.size > 100 * 1024 * 1024) throw new Error('文件超过 100MB，Worker 代理不支持');
 
-    // Check file size (10MB limit)
-    if (file.size > 10 * 1024 * 1024) {
-        throw new Error('文件超过 10MB，MinerU 轻量 API 不支持');
-    }
+    // MinerU 会把 name 拼进 OSS 对象键，中文/空格文件名容易出问题，换成安全名。
+    // \w 只认 ASCII，所以纯中文名会被洗成下划线——那种情况直接用固定名，别让对象键全是下划线。
+    let safeBase = baseName.replace(/[^\w.-]/g, '_').replace(/^\.+/, '').slice(0, 60);
+    if (!/[A-Za-z0-9]/.test(safeBase)) safeBase = 'document';
+    const safeName = `${safeBase}.${sourceFmt}`;
+    const dataId = `ff-${Date.now().toString(36)}`;
 
-    // Step 1: Get presigned upload URL
-    showProgress('初始化 MinerU 任务...', file.name);
+    // Step 1: 申请批次上传地址
+    showProgress('提交 MinerU 解析任务...', file.name);
     updateProgress(5);
 
-    const initResponse = await fetch(`${MINERU_BASE}/parse/file`, {
+    const extraFormats = outputFmt === 'docx' ? ['docx']
+        : outputFmt === 'html' ? ['html', 'docx']
+        : [];
+
+    const initRes = await fetch(`${proxy}/mineru/file-urls/batch`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ file_name: file.name })
+        body: JSON.stringify({
+            files: [{ name: safeName, data_id: dataId }],
+            model_version: 'vlm',
+            language: 'ch',
+            enable_formula: true,
+            enable_table: true,
+            extra_formats: extraFormats,
+        })
     });
 
-    if (!initResponse.ok) {
-        const errText = await initResponse.text();
-        throw new Error(`MinerU 初始化失败 (${initResponse.status}): ${errText.slice(0, 200)}`);
-    }
+    const initData = await initRes.json().catch(() => { throw new Error(`MinerU 申请上传地址失败 (${initRes.status}，返回不是 JSON)`); });
+    assertMineruOk(initData, '申请上传地址', initRes.status);
 
-    const initData = await initResponse.json();
-    console.log('MinerU init response:', initData);
+    const batchId = initData.data?.batch_id;
+    const uploadUrl = initData.data?.file_urls?.[0];
+    if (!batchId || !uploadUrl) throw new Error('MinerU 未返回 batch_id 或上传地址');
 
-    if (initData.code !== 0) {
-        throw new Error(`MinerU 错误：${initData.msg || '未知错误'}`);
-    }
-
-    const taskId = initData.data.task_id;
-    const fileUrl = initData.data.file_url;
-    if (!taskId || !fileUrl) {
-        throw new Error('未获取到任务 ID 或上传地址');
-    }
-
-    // Step 2: Upload file to presigned URL (PUT)
-    showProgress('上传文件到 MinerU...', file.name);
+    // Step 2: 上传文件。预签名 URL 的签名按"无 Content-Type"计算，
+    // 所以这里必须传 ArrayBuffer —— 传 File/Blob 浏览器会自动带上 Content-Type，OSS 会回 SignatureDoesNotMatch。
+    showProgress('上传文件中...', file.name);
     updateProgress(10);
 
-    const uploadResponse = await fetch(fileUrl, {
+    const uploadRes = await fetch(`${proxy}/mineru/upload?target=${encodeURIComponent(uploadUrl)}`, {
         method: 'PUT',
-        headers: { 'Content-Type': file.type || 'application/octet-stream' },
-        body: file
+        body: await file.arrayBuffer(),
     });
-
-    if (!uploadResponse.ok) {
-        const errText = await uploadResponse.text();
-        throw new Error(`MinerU 上传失败 (${uploadResponse.status}): ${errText.slice(0, 200)}`);
+    if (!uploadRes.ok) {
+        const detail = await uploadRes.text().catch(() => '');
+        throw new Error(`MinerU 上传失败 (${uploadRes.status})：${detail.slice(0, 200)}`);
     }
 
-    console.log('MinerU file uploaded successfully');
+    // Step 3: 轮询批次结果（大文件 + vlm 模型可能要几分钟）
+    showProgress('MinerU 解析中，通常需要 1-5 分钟...', file.name);
+    updateProgress(15);
 
-    // Step 3: Poll for completion
-    showProgress('MinerU 解析中（可能需要 1-3 分钟）...', file.name);
-    updateProgress(20);
+    const zipUrl = await pollMineruBatch(proxy, batchId, dataId);
 
-    let taskState = 'pending';
-    let attempts = 0;
-    const maxAttempts = 60; // 60 * 3s = 180s timeout
-    let markdownUrl = null;
-
-    while (taskState !== 'done' && attempts < maxAttempts) {
-        await new Promise(resolve => setTimeout(resolve, 3000));
-        attempts++;
-
-        const statusResponse = await fetch(`${MINERU_BASE}/parse/${taskId}`);
-
-        if (!statusResponse.ok) {
-            throw new Error(`查询 MinerU 任务状态失败 (${statusResponse.status})`);
-        }
-
-        const statusData = await statusResponse.json();
-        console.log(`MinerU poll #${attempts}:`, statusData);
-
-        if (statusData.code !== 0) {
-            throw new Error(`MinerU 任务失败：${statusData.msg || '未知错误'}`);
-        }
-
-        taskState = statusData.data.state;
-
-        if (taskState === 'failed') {
-            throw new Error(`MinerU 解析失败：${statusData.data.err_msg || '未知错误'}`);
-        }
-
-        if (taskState === 'done') {
-            markdownUrl = statusData.data.markdown_url;
-            break;
-        }
-
-        updateProgress(20 + (attempts / maxAttempts) * 50);
-    }
-
-    if (taskState !== 'done') {
-        throw new Error('MinerU 解析超时（180秒），服务可能繁忙');
-    }
-
-    if (!markdownUrl) {
-        throw new Error('未获取到 Markdown 下载链接');
-    }
-
-    // Step 4: Download Markdown
+    // Step 4: 下载结果包并解出目标文件
     showProgress('下载解析结果...', file.name);
-    updateProgress(75);
+    updateProgress(78);
 
-    const mdResponse = await fetch(markdownUrl);
-    if (!mdResponse.ok) {
-        throw new Error('下载 Markdown 失败');
-    }
+    const zipRes = await fetch(`${proxy}/mineru/download?target=${encodeURIComponent(zipUrl)}`);
+    if (!zipRes.ok) throw new Error(`结果包下载失败 (${zipRes.status})`);
+    const zip = await JSZip.loadAsync(await zipRes.arrayBuffer());
 
-    const markdownContent = await mdResponse.text();
+    showProgress('提取转换结果...', file.name);
+    updateProgress(88);
 
-    // Step 5: Convert to output format
-    let blob;
-    let outName;
-
-    if (outputFmt === 'md') {
-        blob = new Blob([markdownContent], { type: 'text/markdown' });
-        outName = `${baseName}.md`;
-    } else if (outputFmt === 'docx') {
-        showProgress('转换为 DOCX...', file.name);
-        updateProgress(85);
-        const htmlContent = marked.parse(markdownContent);
-        blob = await markdownToDocx(htmlContent, baseName);
-        outName = `${baseName}.docx`;
-    } else if (outputFmt === 'html') {
-        const htmlContent = marked.parse(markdownContent);
-        blob = new Blob([htmlContent], { type: 'text/html' });
-        outName = `${baseName}.html`;
-    } else if (outputFmt === 'txt') {
-        const txtContent = markdownContent
-            .replace(/#{1,6}\s/g, '')
-            .replace(/\*\*(.+?)\*\*/g, '$1')
-            .replace(/\*(.+?)\*/g, '$1')
-            .replace(/`(.+?)`/g, '$1')
-            .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
-        blob = new Blob([txtContent], { type: 'text/plain' });
-        outName = `${baseName}.txt`;
-    } else {
-        throw new Error(`MinerU 不支持输出格式：${outputFmt}`);
-    }
+    const { blob, filename, note } = await extractMineruOutput(zip, outputFmt, baseName);
 
     updateProgress(100);
-    return { success: true, blob, filename: outName, method: 'mineru', size: blob.size };
+    return { success: true, blob, filename, method: 'mineru', size: blob.size, note };
 }
 
-// Simple Markdown to DOCX converter (via HTML)
-async function markdownToDocx(htmlContent, baseName) {
-    // Create a temporary HTML document for jsPDF-like approach
-    // For DOCX, we'll create a simple XML-based DOCX
-    const docxContent = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
-<w:body>
-${htmlContent
-    .split('</p>')
-    .filter(p => p.trim())
-    .map(p => {
-        const text = p.replace(/<[^>]+>/g, '').trim();
-        if (!text) return '';
-        return `<w:p><w:r><w:t>${text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</w:t></w:r></w:p>`;
-    })
-    .join('\n')}
-</w:body>
-</w:document>`;
+// MinerU v4 的成功/失败有两种形状：
+//   成功 {"code":0,"data":{...}}
+//   失败 {"success":false,"msgCode":"A0202","msg":"user authenticate failed","data":null}
+// Worker 自己出错则是 {"error":"..."}。三种都要认，否则报错信息会被吞掉。
+function assertMineruOk(payload, step, httpStatus) {
+    if (!payload || typeof payload !== 'object') {
+        throw new Error(`MinerU ${step}：返回格式异常 (HTTP ${httpStatus})`);
+    }
+    if (payload.error) throw new Error(`代理报错：${payload.error} (HTTP ${httpStatus})`);
+    if (payload.success === false) {
+        throw new Error(`MinerU ${step}失败 (${payload.msgCode || httpStatus})：${payload.msg || '未知错误'}`);
+    }
+    if (payload.code !== undefined && payload.code !== 0) {
+        throw new Error(`MinerU ${step}失败 (${payload.code})：${payload.msg || '未知错误'}`);
+    }
+    if (!payload.data) {
+        throw new Error(`MinerU ${step}：响应里没有 data 字段 (HTTP ${httpStatus})`);
+    }
+    return payload.data;
+}
 
-    // Create a minimal DOCX (ZIP with XML)
-    // For simplicity, return as HTML with .docx extension (Word can open it)
-    const fullHtml = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>${baseName}</title></head><body>${htmlContent}</body></html>`;
-    return new Blob([fullHtml], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
+// 轮询 MinerU 批次；返回结果 zip 地址
+async function pollMineruBatch(proxy, batchId, dataId) {
+    const intervalMs = 5000;
+    const maxAttempts = 90; // 约 7.5 分钟
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        await new Promise(r => setTimeout(r, intervalMs));
+
+        const res = await fetch(`${proxy}/mineru/extract-results/batch/${batchId}`);
+        const data = await res.json().catch(() => null);
+        const payload = assertMineruOk(data, '查询任务状态', res.status);
+
+        const items = payload.extract_result || [];
+        // 一个批次只有一个文件，但按 data_id 兜底匹配，避免顺序变化拿错
+        const item = items.find(i => i.data_id === dataId) || items[0];
+        if (!item) {
+            console.warn(`MinerU poll #${attempt}: 还没有结果条目`);
+            continue;
+        }
+
+        console.log(`MinerU poll #${attempt}:`, item.state);
+
+        if (item.state === 'failed') {
+            throw new Error(`MinerU 解析失败：${item.err_msg || '未知错误'}`);
+        }
+        if (item.state === 'done') {
+            if (!item.full_zip_url) throw new Error('MinerU 解析完成但没有返回结果包地址');
+            return item.full_zip_url;
+        }
+
+        updateProgress(15 + Math.min(attempt / maxAttempts, 1) * 60);
+    }
+
+    throw new Error('MinerU 解析超时（约 7 分钟），文件可能过大或服务繁忙');
+}
+
+// 从 MinerU 结果 zip 里取出目标格式文件。
+// 不硬编码文件名：pipeline / vlm 两个模型的包内命名不完全一致，按后缀找。
+async function extractMineruOutput(zip, outputFmt, baseName) {
+    const entries = [];
+    zip.forEach((relativePath, entry) => {
+        if (!entry.dir) entries.push({ path: relativePath, entry });
+    });
+
+    const pick = (ext, preferred) => {
+        const want = preferred.toLowerCase();
+        const matches = entries.filter(e => e.path.toLowerCase().endsWith(ext));
+        return matches.find(e => e.path.toLowerCase() === want)
+            || matches.find(e => !e.path.includes('/'))
+            || matches[0];
+    };
+
+    if (outputFmt === 'docx') {
+        const hit = pick('.docx', 'full.docx');
+        if (!hit) {
+            throw new Error('结果包里没有找到 DOCX。可能是 MinerU token 未开通该输出，或解析降级了；' +
+                '可以先转 Markdown 试试。');
+        }
+        const buf = await hit.entry.async('arraybuffer');
+        return {
+            blob: new Blob([buf], { type: MINERU_DOCX_MIME }),
+            filename: `${baseName}.docx`,
+        };
+    }
+
+    if (outputFmt === 'html') {
+        const hit = pick('.html', 'full.html');
+        if (hit) {
+            const html = await hit.entry.async('string');
+            return {
+                blob: new Blob([html], { type: 'text/html' }),
+                filename: `${baseName}.html`,
+            };
+        }
+        // 没有 html 就退回 Markdown 渲染，至少不空手而归
+        const md = await readMineruMarkdown(zip);
+        return {
+            blob: new Blob([marked.parse(md)], { type: 'text/html' }),
+            filename: `${baseName}.html`,
+            note: '结果包里没有 HTML，已用 Markdown 渲染生成',
+        };
+    }
+
+    // md / txt 都基于 full.md
+    const md = await readMineruMarkdown(zip);
+
+    if (outputFmt === 'txt') {
+        // 纯文本要丢掉图片，就别先内嵌再删一遍 base64 了
+        return { blob: new Blob([markdownToPlainText(md)], { type: 'text/plain' }), filename: `${baseName}.txt` };
+    }
+
+    const inlined = await inlineMineruImages(zip, md);
+
+    if (outputFmt === 'md') {
+        return { blob: new Blob([inlined.text], { type: 'text/markdown' }), filename: `${baseName}.md`, note: inlined.note };
+    }
+
+    throw new Error(`MinerU 不支持输出格式：${outputFmt}`);
+}
+
+function markdownToPlainText(md) {
+    return md
+        .replace(/!\[[^\]]*\]\([^)]*\)/g, '')                                  // 图片
+        .replace(/^([^\n]*\|[^\n]*)\n\|[^\n]*(?:-{2,}|:{2,})[^\n]*$/gm, '$1')  // 表格分隔行
+        .replace(/\|/g, ' ')
+        .replace(/^#{1,6}\s+/gm, '')
+        .replace(/\*\*(.+?)\*\*/g, '$1')
+        .replace(/\*(.+?)\*/g, '$1')
+        .replace(/`{1,3}([^`]*)`{1,3}/g, '$1')
+        .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+        .replace(/^[ \t>]*[-*+][ \t]+/gm, '')                                  // 列表符号（别把换行也吃掉）
+        .replace(/\n{3,}/g, '\n\n')
+        .trim();
+}
+
+async function readMineruMarkdown(zip) {
+    let md = null;
+    zip.forEach((p, e) => {
+        if (!e.dir && /(^|\/)full\.md$/i.test(p)) md = e;
+    });
+    if (!md) {
+        zip.forEach((p, e) => {
+            if (!md && !e.dir && /\.md$/i.test(p)) md = e;
+        });
+    }
+    if (!md) throw new Error('结果包里没有找到 Markdown 文件');
+    return await md.async('string');
+}
+
+// MinerU 的 Markdown 用 images/xxx.png 相对路径引图，单独下载 .md 会全部丢图。
+// 这里把图片转成 data URI 内嵌，总量控制在 8MB 以内，超了就保持原样。
+async function inlineMineruImages(zip, mdText) {
+    const MAX_INLINE_BYTES = 8 * 1024 * 1024;
+    const refs = [...new Set(
+        [...mdText.matchAll(/!\[[^\]]*\]\(\s*(?!data:)([^)\s]+)/g)].map(m => m[1])
+    )];
+    if (refs.length === 0) return { text: mdText };
+
+    const resolved = [];
+    let total = 0;
+    for (const ref of refs) {
+        const clean = decodeURIComponent(ref.replace(/^\.\//, ''));
+        const entry = zip.file(clean);
+        if (!entry) continue;
+        const data = await entry.async('base64');
+        const bytes = Math.round(data.length * 3 / 4);
+        total += bytes;
+        if (total > MAX_INLINE_BYTES) {
+            return { text: mdText, note: `图片共 ${refs.length} 张，超过 8MB，未内嵌（.md 里的 images/ 路径需要在同一个结果包里找）` };
+        }
+        const ext = (clean.split('.').pop() || 'png').toLowerCase();
+        const mime = ext === 'jpg' || ext === 'jpeg' ? 'image/jpeg' : `image/${ext}`;
+        resolved.push({ ref, dataUri: `data:${mime};base64,${data}` });
+    }
+
+    let text = mdText;
+    for (const { ref, dataUri } of resolved) {
+        text = text.split(ref).join(dataUri);
+    }
+    return { text, note: text === mdText ? undefined : `已内嵌 ${resolved.length} 张图片` };
 }
 
 // ============================================================
@@ -1454,6 +1525,22 @@ function hideProgress() {
     document.getElementById('convertBtn').classList.remove('opacity-50');
 }
 
+// 引擎文案的唯一来源：徽标、结果列表、历史都调这里，避免三处写法不一致
+function engineLabel(method) {
+    if (method === 'client') return '客户端转换';
+    if (method === 'mineru') return 'MinerU 精准解析';
+    return 'CloudConvert';
+}
+
+function escapeHtml(str) {
+    return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
 function showResults(results) {
     hideProgress();
     const area = document.getElementById('resultArea');
@@ -1473,11 +1560,18 @@ function showResults(results) {
                 : 'border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-900/20');
 
         if (r.success) {
+            // note / warning 来自上游，必须转义后再插进 DOM
+            const extras = [r.warning && `已退回 CloudConvert：${escapeHtml(r.warning)}`,
+                            r.note && escapeHtml(r.note)]
+                .filter(Boolean)
+                .map(t => `<p class="text-xs text-amber-600 dark:text-amber-400">${t}</p>`)
+                .join('');
             div.innerHTML = `
                 <i data-lucide="file-check" class="w-5 h-5 text-green-500 flex-shrink-0"></i>
                 <div class="flex-1 min-w-0">
                     <p class="text-sm font-medium truncate">${r.filename}</p>
-                    <p class="text-xs text-gray-400">${formatFileSize(r.size)} · ${r.method === 'client' ? '客户端' : r.method === 'mineru' ? 'MinerU' : 'CloudConvert'}</p>
+                    <p class="text-xs text-gray-400">${formatFileSize(r.size)} · ${engineLabel(r.method)}</p>
+                    ${extras}
                 </div>
                 <button onclick="downloadResult(${idx})" class="px-3 py-1.5 bg-primary-500 text-white rounded-lg text-xs font-medium hover:bg-primary-600 transition flex items-center gap-1">
                     <i data-lucide="download" class="w-3 h-3"></i>
@@ -1489,7 +1583,7 @@ function showResults(results) {
                 <i data-lucide="alert-circle" class="w-5 h-5 text-red-500 flex-shrink-0"></i>
                 <div class="flex-1 min-w-0">
                     <p class="text-sm font-medium truncate">${r.filename}</p>
-                    <p class="text-xs text-red-400">${r.error}</p>
+                    <p class="text-xs text-red-400">${escapeHtml(r.error || '转换失败')}</p>
                 </div>
             `;
         }
@@ -1555,7 +1649,7 @@ function renderHistory() {
             <i data-lucide="file-check" class="w-4 h-4 text-green-500 flex-shrink-0"></i>
             <div class="flex-1 min-w-0">
                 <p class="text-xs font-medium truncate">${h.filename}</p>
-                <p class="text-xs text-gray-400">${formatFileSize(h.size)} · ${h.method === 'client' ? '本地' : 'API'} · ${new Date(h.time).toLocaleString('zh-CN')}</p>
+                <p class="text-xs text-gray-400">${formatFileSize(h.size)} · ${engineLabel(h.method)} · ${new Date(h.time).toLocaleString('zh-CN')}</p>
             </div>
         </div>
     `).join('');
@@ -1599,6 +1693,39 @@ function saveProxyUrl() {
     state.settings.proxyUrl = document.getElementById('proxyUrlInput').value.trim().replace(/\/$/, '');
     localStorage.setItem('ff_proxy_url', state.settings.proxyUrl);
     showToast('代理地址已保存');
+    checkProxyHealth();
+    // 代理状态会改变 PDF 可选的转换引擎，重新渲染一次选项
+    if (state.files.length > 0) renderFileQueue();
+}
+
+// 询问 Worker 的 /health，确认上游密钥配好了没有。
+// 老版本 Worker 没有这个路由（返回 404），此时只提示"已保存"，不下结论。
+async function checkProxyHealth() {
+    const el = document.getElementById('proxyHealth');
+    if (!el) return;
+    const proxy = state.settings.proxyUrl;
+    if (!proxy) {
+        el.textContent = '未配置代理：PDF 转换只会走 CloudConvert，质量一般。';
+        el.classList.remove('hidden');
+        return;
+    }
+    el.textContent = '正在检测代理...';
+    el.classList.remove('hidden');
+    try {
+        const res = await fetch(`${proxy}/health`, { method: 'GET' });
+        if (!res.ok) {
+            el.textContent = `代理可访问，但 /health 返回 ${res.status}。若是旧版 Worker，重新粘贴最新代码部署即可。`;
+            return;
+        }
+        const data = await res.json();
+        const parts = [];
+        parts.push(data.cloudconvert ? 'CloudConvert ✓' : 'CloudConvert ✗ 未配密钥');
+        parts.push(data.mineru ? 'MinerU ✓' : 'MinerU ✗ 未配 token');
+        el.textContent = '代理已连通：' + parts.join('，') +
+            (data.mineru ? '' : '（MinerU 用不了，PDF 会退回 CloudConvert）');
+    } catch (e) {
+        el.textContent = '代理无法访问：' + e.message;
+    }
 }
 
 function toggleKeyVisibility() {
@@ -1606,9 +1733,43 @@ function toggleKeyVisibility() {
     input.type = input.type === 'password' ? 'text' : 'password';
 }
 
+let workerCodeCache = null;
+
+// Worker 代码只保留仓库里的 worker/proxy.js 一份，弹窗按需拉取，
+// 避免前端内嵌副本和真实代码不同步（以前踩过这个坑）。
 function showWorkerCode() {
     document.getElementById('workerModal').classList.remove('hidden');
     lucide.createIcons();
+    loadWorkerCode();
+}
+
+async function loadWorkerCode() {
+    const block = document.getElementById('workerCodeBlock');
+    const render = (text) => { block.textContent = text; };
+    if (workerCodeCache) { render(workerCodeCache); return; }
+    render('正在加载 Worker 代码...');
+    try {
+        const res = await fetch(WORKER_CODE_URL, { cache: 'no-store' });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        workerCodeCache = await res.text();
+        render(workerCodeCache);
+    } catch (e) {
+        render(`代码加载失败（${e.message}）。\n请直接在 GitHub 打开：\n${WORKER_CODE_URL}`);
+    }
+}
+
+async function copyWorkerCode() {
+    if (!workerCodeCache) await loadWorkerCode();
+    if (!workerCodeCache || workerCodeCache.startsWith('代码加载失败')) {
+        showToast('代码还没加载出来，先点上面的 GitHub 链接');
+        return;
+    }
+    try {
+        await navigator.clipboard.writeText(workerCodeCache);
+        showToast('Worker 代码已复制');
+    } catch {
+        showToast('浏览器不允许自动复制，请手动选中代码框内容');
+    }
 }
 
 function closeWorkerModal() {

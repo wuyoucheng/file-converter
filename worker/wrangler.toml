@@ -1,0 +1,17 @@
+# FormatFlow 代理 Worker 配置
+# 部署前先登录: npx wrangler login
+# 然后写入两个密钥（交互式粘贴，不会进 git）:
+#   npx wrangler secret put CLOUDCONVERT_API_KEY
+#   npx wrangler secret put MINERU_API_TOKEN
+# 最后部署: npx wrangler deploy
+
+name = "formatflow-proxy"
+main = "proxy.js"
+compatibility_date = "2025-06-01"
+
+# 部署完把 https://formatflow-proxy.<你的子域>.workers.dev 填到
+# FormatFlow 设置面板的「Cloudflare Worker 代理」里。
+
+# 密钥不要写在这个文件里，用 wrangler secret put 设置。
+# [vars]
+# CLOUDCONVERT_API_KEY = "..."   ← 不要这样写
